@@ -1,6 +1,7 @@
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::timer::{EventTimers, Timer};
-use crate::settings::triggers::TriggerRequest;
+use crate::settings::triggers::{TriggerConfig, TriggerRequest};
 use autopulse_utils::join_path;
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +14,33 @@ pub struct Sonarr {
     /// Targets to ignore
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// Path filter matched against the rewritten file path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// Event-specific timers
     pub event_timers: Option<EventTimers>,
+}
+
+impl TriggerConfig for Sonarr {
+    fn rewrite(&self) -> Option<&Rewrite> {
+        self.rewrite.as_ref()
+    }
+
+    fn timer(&self) -> Option<&Timer> {
+        self.timer.as_ref()
+    }
+
+    fn excludes(&self) -> &Vec<String> {
+        &self.excludes
+    }
+
+    fn filter(&self) -> &PathFilter {
+        &self.filter
+    }
+
+    fn event_timers(&self) -> Option<&EventTimers> {
+        self.event_timers.as_ref()
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -45,7 +71,11 @@ pub enum SonarrRequest {
     #[serde(rename = "Download")]
     #[serde(rename_all = "camelCase")]
     Download {
-        episode_file: EpisodeFile,
+        /// Single file import (WebhookImportPayload)
+        episode_file: Option<EpisodeFile>,
+        /// Batch import (WebhookImportCompletePayload) - Sonarr sends `episodeFiles` (plural)
+        #[serde(default)]
+        episode_files: Vec<EpisodeFile>,
         #[serde(default)]
         deleted_files: Vec<EpisodeFile>,
         series: Series,
@@ -67,6 +97,8 @@ pub enum SonarrRequest {
     },
     #[serde(rename = "Test")]
     Test,
+    #[serde(other)]
+    Other,
 }
 
 impl TriggerRequest for SonarrRequest {
@@ -98,10 +130,19 @@ impl TriggerRequest for SonarrRequest {
             Self::SeriesDelete { series } => vec![(series.path.clone(), false)],
             Self::Download {
                 episode_file,
+                episode_files,
                 series,
                 deleted_files,
             } => {
-                let mut paths = vec![(join_path(&series.path, &episode_file.relative_path), true)];
+                let mut paths: Vec<(String, bool)> = vec![];
+
+                if let Some(ef) = episode_file {
+                    paths.push((join_path(&series.path, &ef.relative_path), true));
+                }
+
+                for ef in episode_files {
+                    paths.push((join_path(&series.path, &ef.relative_path), true));
+                }
 
                 for file in deleted_files {
                     paths.push((join_path(&series.path, &file.relative_path), false));
@@ -109,7 +150,7 @@ impl TriggerRequest for SonarrRequest {
 
                 paths
             }
-            Self::Test => vec![],
+            Self::Test | Self::Other => vec![],
         }
     }
 }

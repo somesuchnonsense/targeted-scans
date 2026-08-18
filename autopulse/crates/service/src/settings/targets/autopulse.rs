@@ -1,4 +1,5 @@
 use super::{Request, RequestBuilderPerform};
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::{auth::Auth, targets::TargetProcess};
 use autopulse_database::models::ScanEvent;
@@ -17,6 +18,9 @@ pub struct Autopulse {
     pub trigger: Option<String>,
     /// Rewrite path for the file
     pub rewrite: Option<Rewrite>,
+    /// Path filter matched against the target-rewritten path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// HTTP request options
     #[serde(default)]
     pub request: Request,
@@ -38,14 +42,14 @@ impl Autopulse {
 
     async fn scan(&self, ev: &ScanEvent) -> anyhow::Result<()> {
         let client = self.get_client()?;
-        let mut url = get_url(&self.url)?.join("triggers/manual")?;
+        let trigger = self.trigger.as_deref().unwrap_or("manual");
+        let mut url = get_url(&self.url)?.join(&format!("triggers/{trigger}"))?;
 
         url.query_pairs_mut()
             .append_pair("path", &ev.get_path(&self.rewrite));
 
-        if ev.file_hash.is_some() {
-            url.query_pairs_mut()
-                .append_pair("hash", ev.file_hash.as_ref().unwrap());
+        if let Some(hash) = &ev.file_hash {
+            url.query_pairs_mut().append_pair("hash", hash);
         }
 
         client.get(url).perform().await.map(|_| ())

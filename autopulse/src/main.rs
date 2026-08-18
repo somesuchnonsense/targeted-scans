@@ -12,14 +12,14 @@
 #![doc = include_str!("../README.md")]
 
 use anyhow::Context;
-use autopulse_database::conn::{get_conn, get_pool, AnyConnection};
+use autopulse_database::conn::{close_pool, get_conn, get_pool, AnyConnection};
 use autopulse_server::get_server;
 use autopulse_service::manager::PulseManager;
-use autopulse_service::settings::Settings;
+use autopulse_service::settings::{opts::Opts, Settings};
 use autopulse_utils::tracing_appender::non_blocking::WorkerGuard;
 use autopulse_utils::{setup_logs, Rotation};
 use clap::Parser;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Arguments for CLI
 ///
@@ -89,6 +89,10 @@ async fn run(settings: Settings, _guard: Option<WorkerGuard>) -> anyhow::Result<
 
     let manager = PulseManager::new(settings, pool);
 
+    if manager.settings.auth.is_default_credentials() {
+        warn!("using default credentials (admin/password), change them in your config");
+    }
+
     let handle_events_task = manager.start();
     let handle_webhooks_task = manager.start_webhooks();
     let handle_notify_task = manager.start_notify();
@@ -115,6 +119,8 @@ async fn run(settings: Settings, _guard: Option<WorkerGuard>) -> anyhow::Result<
         }
     }
 
+    close_pool(&manager.pool);
+
     Ok(())
 }
 
@@ -122,24 +128,28 @@ async fn run(settings: Settings, _guard: Option<WorkerGuard>) -> anyhow::Result<
 fn setup() -> anyhow::Result<(Settings, Option<WorkerGuard>)> {
     let args = Args::parse();
 
-    let settings = Settings::get_settings(args.config).context("failed to load settings");
+    let loaded = Settings::get_settings(args.config).context("failed to load settings");
 
-    match settings {
-        Ok(settings) => {
+    match loaded {
+        Ok(loaded) => {
+            let log_file_rollover = Rotation::from(&loaded.settings.opts.log_file_rollover);
             let guard = setup_logs(
-                &settings.app.log_level,
-                &settings.opts.log_file,
-                &(&settings.opts.log_file_rollover).into(),
-                settings.app.api_logging,
+                &loaded.settings.app.log_level,
+                &loaded.settings.opts.log_file,
+                &log_file_rollover,
+                loaded.settings.opts.log_file_max_files,
+                loaded.settings.app.api_logging,
             )?;
+            loaded.log_diagnostics();
 
-            Ok((settings, guard))
+            Ok((loaded.settings, guard))
         }
         Err(e) => {
             setup_logs(
                 &autopulse_utils::LogLevel::Info,
                 &None,
                 &Rotation::NEVER,
+                Opts::default().log_file_max_files,
                 false,
             )?;
 
@@ -153,6 +163,7 @@ pub fn main() -> anyhow::Result<()> {
     match setup() {
         Ok((settings, guard)) => {
             info!("💫 autopulse v{} starting up...", env!("CARGO_PKG_VERSION"),);
+            settings.log_summary();
 
             if let Err(e) = run(settings, guard) {
                 error!("{:?}", e);

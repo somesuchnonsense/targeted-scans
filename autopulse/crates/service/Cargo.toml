@@ -5,7 +5,9 @@ edition = "2021"
 version.workspace = true
 
 [features]
-vendored = ["reqwest/native-tls-vendored"]
+sqlite = ["autopulse-database/sqlite"]
+postgres = ["autopulse-database/postgres"]
+vendored = []
 
 [dependencies]
 # Crates
@@ -22,20 +24,32 @@ tokio = { workspace = true, features = ["macros", "process"] }
 futures = { workspace = true }
 
 # HTTP client
-reqwest = { version = "0.13.0", features = ["json", "stream"] }
+reqwest = { version = "0.13.0", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls",
+    "stream",
+    "system-proxy",
+] }
 
 # Credential encoding
-base64 = "0.22.1"
+base64 = "0.23.0"
 
 # Config
-config = "0.15.6"
+figment = { version = "0.10", features = ["toml", "yaml", "json", "env"] }
 
 # File system notifications
-notify = "8.0.0"
+notify-debouncer-full = "0.7.0"
+
+# HTML encoding
+html-escape = "0.2"
 
 # Other
-struson = { version = "0.6.0", features = [
+struson = { version = "0.7.0", features = [
     "simple-api",
     "serde",
 ] } # Parse Jellyfin response as a stream
-async-recursion = "1.1.1" # Retry requests for webhooks
+
+[dev-dependencies]
+tempfile = "3"

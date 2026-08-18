@@ -6,8 +6,7 @@ permissions:
 on:
   release:
     types: [published]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: continuous-delivery-${{ github.ref }}
@@ -21,6 +20,8 @@ env:
   RUST_BACKTRACE: 1
   RUSTFLAGS: -D warnings
   RUSTUP_MAX_RETRIES: 10
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 defaults:
   run:
@@ -57,7 +58,7 @@ jobs:
           #   os: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -78,27 +79,28 @@ jobs:
       #   run: |
       #     choco install postgresql libsqlite3
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cargo Cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
           key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-full-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-release-${{ matrix.target }}-full-
 
       - name: Install Rust toolchain
-        uses: taiki-e/github-actions/install-rust@main
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          component: rustfmt,clippy
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
 
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1
         with:
           target: ${{ matrix.target }}
 
@@ -118,19 +120,9 @@ jobs:
           sudo apt install -y libssl-dev libpq-dev libsqlite3-dev
         if: startsWith(matrix.os, 'ubuntu') && !contains(matrix.target, '-musl')
 
-      - name: Cache vcpkg (Windows)
+      - name: Use Strawberry Perl for OpenSSL build (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v5
-        with:
-          path: C:\vcpkg\installed
-          key: ${{ runner.os }}-vcpkg-openssl-x64-windows-static-md-v1
-
-      - name: Install OpenSSL (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-          vcpkg install openssl:x64-windows-static-md
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl" >> $GITHUB_ENV
 
       # SQLite and PostgreSQL installations removed - vendored feature uses
       # pq-sys/bundled and libsqlite3-sys/bundled which compile from source
@@ -141,7 +133,7 @@ jobs:
       #     HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install sqlite
       #   if: startsWith(matrix.os, 'macos')
 
-      - uses: taiki-e/upload-rust-binary-action@main
+      - uses: taiki-e/upload-rust-binary-action@14950759bde99e9dbc62b33fff358f17d1542832 # main
         with:
           bin: autopulse
           target: ${{ matrix.target }}
@@ -149,4 +141,4 @@ jobs:
           zip: windows
           features: ${{ (contains(matrix.target, '-musl') || startsWith(matrix.os, 'windows')) && 'vendored' || '' }}
           token: ${{ secrets.GITHUB_TOKEN }}
-          dry-run: ${{ github.event_name == 'pull_request' }}
+          dry-run: ${{ github.event_name != 'release' }}

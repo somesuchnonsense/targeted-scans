@@ -1,6 +1,10 @@
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::timer::EventTimers;
-use crate::settings::{timer::Timer, triggers::TriggerRequest};
+use crate::settings::{
+    timer::Timer,
+    triggers::{TriggerConfig, TriggerRequest},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -12,8 +16,33 @@ pub struct Lidarr {
     /// Targets to ignore
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// Path filter matched against the rewritten file path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// Event-specific timers
     pub event_timers: Option<EventTimers>,
+}
+
+impl TriggerConfig for Lidarr {
+    fn rewrite(&self) -> Option<&Rewrite> {
+        self.rewrite.as_ref()
+    }
+
+    fn timer(&self) -> Option<&Timer> {
+        self.timer.as_ref()
+    }
+
+    fn excludes(&self) -> &Vec<String> {
+        &self.excludes
+    }
+
+    fn filter(&self) -> &PathFilter {
+        &self.filter
+    }
+
+    fn event_timers(&self) -> Option<&EventTimers> {
+        self.event_timers.as_ref()
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -59,6 +88,8 @@ pub enum LidarrRequest {
     AlbumDelete { artist: Artist },
     #[serde(rename = "Test")]
     Test,
+    #[serde(other)]
+    Other,
 }
 
 impl TriggerRequest for LidarrRequest {
@@ -86,7 +117,7 @@ impl TriggerRequest for LidarrRequest {
             Self::ArtistDelete { artist } | Self::AlbumDelete { artist } => {
                 vec![(artist.path.clone(), false)]
             }
-            Self::Test => vec![],
+            Self::Test | Self::Other => vec![],
         }
     }
 }

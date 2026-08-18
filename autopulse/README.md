@@ -29,8 +29,6 @@
 
 autopulse is a web server that receives notifications from media organizers like Sonarr/Radarr/Lidarr/etc ([triggers](#terminology)) and updates the items in media servers like Plex/Jellyfin/Emby/etc ([targets](#terminology)). It is designed to be efficient, only updating the items that have changed, reducing the load on media servers.
 
-> Why migrate from [autoscan](https://github.com/Cloudbox/autoscan)? autoscan is a great project and autopulse takes a lot of inspiration from it, but it is no longer maintained and isn't very efficient at updating libraries as it uses a more general "scan" on a folder rather than a specific file. autopulse finds the corresponding library item and sends an update request directly.
-
 ### Terminology
 
 We use the following terminology:
@@ -38,6 +36,7 @@ We use the following terminology:
   - [Manual](#manual) (default: /triggers/manual)
     - Fileflows ([sub-flow](https://github.com/dan-online/autopulse/issues/5#issuecomment-2333917695))
   - Sonarr
+  - Sportarr
   - Radarr
   - Lidarr
   - Readarr
@@ -71,7 +70,7 @@ We use the following terminology:
 - **Integration**: integrates with Sonarr, Radarr, Plex, Jellyfin, and more in the future
 - **Checks**: checks the file exists before updating the target and optionally waits for the file to match a provided hash
 - **Reliability**: uses a database to store the state of the scan requests
-- **Webhooks**: allow for notifications to be sent when a file is ready to be processed with webhooks such as Discord
+- **Webhooks**: allow for notifications to be sent when a file is ready to be processed with Discord, Matrix Hookshot, or generic JSON webhooks
 - **User-Interface**: provides a simple web interface to view/add scan requests
 
 ## Getting Started
@@ -87,9 +86,25 @@ The easiest way to get started with autopulse is to use the provided docker imag
 - `latest-sqlite` - smaller image that only supports SQLite
 - `stable` - latest versioned release
 
-- `ui` - self-hostable UI for autopulse
-
 > All images are multi-arch and support `linux/amd64`, `linux/arm64`, however -amd64 and -arm64 suffixes can be used to specify the architecture
+
+#### Unraid
+
+An Unraid Community Apps template lives in [`unraid/autopulse.xml`](unraid/autopulse.xml).
+
+Once autopulse is listed in Community Apps, open the **Apps** tab in Unraid, search for `autopulse`, and click **Install**. Until then, install it as a private Community App:
+
+1. Make sure Community Applications is installed (it ships with Unraid via the Apps tab).
+2. SSH to your Unraid server and run:
+
+   ```bash
+   mkdir -p /boot/config/plugins/community.applications/private/autopulse
+   wget -O /boot/config/plugins/community.applications/private/autopulse/autopulse.xml \
+     https://raw.githubusercontent.com/dan-online/autopulse/main/unraid/autopulse.xml
+   ```
+
+3. In the WebUI, open **Apps** and select **Private apps** from the left sidebar, then click **Install** on autopulse.
+4. Adjust the **Media share** path and change **AUTOPULSE__AUTH__PASSWORD** from the default `change-me` before clicking Apply.
 
 #### Compose
 
@@ -126,13 +141,13 @@ Here's some quick links:
 
 #### Configuration
 
-autopulse requires a configuration file to run. By default, it looks for `config.toml` in the current working directory. You can override the default values using a config file or by [setting environment variables](https://github.com/dan-online/autopulse/blob/main/example/docker-compose.yml) in the format of: ``AUTOPULSE__{SECTION}__{KEY}``. 
+autopulse requires a configuration file to run. By default, it searches the current working directory for `config.toml`, `config.yaml`, `config.yml`, or `config.json` in that order. You can pass `--config /path/to/config.toml` to load an explicit file, and override values by [setting environment variables](https://github.com/dan-online/autopulse/blob/main/example/docker-compose.yml) in the format of: ``AUTOPULSE__{SECTION}__{KEY}``.
 
 For example: `AUTOPULSE__APP__DATABASE_URL`
 
 An example has been provided in the [example](https://github.com/dan-online/autopulse/blob/main/example) directory
 
-> Note: You can provide the config with `json`, `toml`, `yaml`, `json5`, `ron`, or `ini` format
+> Note: You can provide the config as `config.toml`, `config.yaml`, `config.yml`, or `config.json`
 
 > Note: You can also provide the path to a variable by appending `__FILE`
 > For example: `AUTOPULSE__AUTH__PASSWORD__FILE=/run/secrets/autopulse_password`
@@ -158,6 +173,15 @@ triggers:
     rewrite:
       from: "/downloads"
       to: "/tvshows"
+    filter:
+      exclude:
+        - "^/tvshows/extras/"
+
+  my_sportarr:
+    type: "sportarr"
+    rewrite:
+      from: "/downloads"
+      to: "/sports"
 
   my_radarr:
     type: "radarr"
@@ -184,6 +208,25 @@ webhooks:
     type: "discord"
     url: "https://discord.com/api/webhooks/1234567890/abcdefg"
 
+  my_discord_with_mentions:
+    type: "discord"
+    url: "https://discord.com/api/webhooks/1234567890/abcdefg"
+    mentions:
+      - targets:
+          - here
+          - role: "1234567890"
+          - user: "9876543210"
+        on: [failed, hash_mismatch]
+      - targets: [everyone]
+
+  my_hookshot:
+    type: "hookshot"
+    url: "https://matrix.example.com/_matrix/hookshot/webhook/abcdefg"
+
+  my_json:
+    type: "json"
+    url: "https://example.com/webhooks/autopulse"
+
 targets:
   my_plex:
     type: "plex"
@@ -202,6 +245,16 @@ targets:
     type: "jellyfin"
     url: "http://jellyfin:8096"
     token: "<your_token>"
+
+  my_audiobookshelf:
+    type: "audiobookshelf"
+    url: "http://audiobookshelf:13378"
+    token: "<your_token>"
+    filter:
+      include:
+        - "^/audiobooks/"
+      exclude:
+        - "/samples/"
 
   my_command:
     type: "command"
@@ -244,48 +297,13 @@ $ curl -u "admin:password" "http://localhost:2875/api/config-template?database=p
 
 #### UI
 
-The autopulse ui is a simple web interface that allows you to view and add scan requests. It is available hosted on Cloudflare Pages at [autopulseui.pages.dev](https://autopulseui.pages.dev/) or you can host it yourself using the provided docker image. Note that requests are made server-side so you do not need to expose your autopulse instance to the internet, only the UI when self-hosting.
+The web UI ships in the main autopulse image and is served at `/ui/*` on the same port (default `2875`). It lets you browse scan events, retry failures, view config, and submit manual scans.
 
-##### Environment Variables
-
-| Variable | Description | Example |
-| --- | --- | --- |
-| `FORCE_DEFAULT_SERVER_URL` | Forces the default server URL to be used | `true` |
-| `DEFAULT_SERVER_URL` | The default server URL to use | `http://localhost:2875` |
-| `FORCE_AUTH` | Forces the UI to use auth from env | `true` |
-| `FORCE_SERVER_URL` | Forces the server url | `true` |
-| `FORCE_USERNAME` | Forces the username | `true` |
-| `FORCE_PASSWORD` | Forces the password | `true` |
-| `ORIGIN` | Required when proxying requests | `https://mycool.domain` |
-| `PORT` | Change the port | `2885` |
-
-###### Examples
-
-Force a default server URL
-
-```env
-FORCE_DEFAULT_SERVER_URL=true
-DEFAULT_SERVER_URL=http://localhost:2875
-```
-
-Force the UI to use the provided auth
-
-```env
-FORCE_AUTH=true
-FORCE_SERVER_URL=https://localhost:2875
-FORCE_USERNAME=admin
-FORCE_PASSWORD=password
-```
+Default credentials are `admin` / `password` (the same as the API auth). Change them via the standard `auth.username` / `auth.password` config keys; sessions issued under old credentials are invalidated automatically.
 
 ##### Reverse Proxy
 
-To serve the autopulse ui behind a reverse proxy **with** a base path, you must use the `ui-dynamic` tag instead. This builds the UI on startup and ensures paths are based on a given base path. Useful for nginx/etc
-
-###### Environment Variables
-
-| Variable | Description | Example |
-| --- | --- | --- |
-| `BASE_PATH` | Set the path for requests | `/autopulse` |
+To serve the UI behind a reverse proxy with a path prefix, set `app.base_path` and have the proxy pass the prefix through (no strip-prefix). UI routes mount under `base_path` server-side. See [`app` settings](https://autopulse.dancodes.online/autopulse_service/settings/app/struct.App.html) for the full list of relevant options.
 
 ## To-do
 
@@ -358,6 +376,77 @@ $ cargo run
 $ cargo run --no-default-features --features sqlite   # for sqlite
 $ cargo run --no-default-features --features postgres # for postgres
 ```
+
+## FAQ
+
+### What URL do I put in Sonarr, Radarr, Lidarr, or Readarr?
+
+Create a webhook/connection in the source app that points at the matching autopulse trigger:
+
+```text
+http://<autopulse-host>:2875/triggers/<trigger-name>
+```
+
+For example, a config entry named `triggers.radarr` uses `/triggers/radarr`; `triggers.my_radarr` uses `/triggers/my_radarr`. Use `POST` and the same basic auth credentials configured under `auth.username` and `auth.password`.
+
+Enable events that include file paths, such as import/download, upgrade, rename, and delete.
+
+### Which paths should I use for `rewrite.from` and `rewrite.to`?
+
+Use `rewrite` only when the path sent by the trigger is not the path autopulse or a target should use.
+
+- `from` is the path pattern in the webhook payload from Sonarr, Radarr, Lidarr, Readarr, etc.
+- `to` is the path autopulse should process next.
+
+For Arr triggers, this usually means the final media path from the Arr app, not the temporary downloader folder. If the source app and target already use the same path, omit `rewrite`.
+
+Trigger rewrites run before the event is stored. Target rewrites run later per target, which is useful when Plex, Jellyfin, Emby, or another target sees the same library through a different mount path. The `from` value is a regex, so anchor it, for example `^/downloads`, when you only want to replace a prefix.
+
+### Does autopulse need my media files mounted inside the container?
+
+Not by default. With `opts.check_path = false`, autopulse can route webhook paths without reading the file itself.
+
+If `opts.check_path = true`, the rewritten path must exist inside the autopulse runtime/container before the event is sent to targets. Hash checks and `anchors` also require filesystem access. Mount those paths read-only if possible, and make sure your rewrites point to the path as autopulse sees it.
+
+Targets still need their own valid library paths and autopulse must be able to reach the target API URL.
+
+### Why did autopulse start with no targets or only the default manual trigger?
+
+That usually means autopulse did not load your config file. Without `--config`, it searches the current working directory for `config.toml`, `config.yaml`, `config.yml`, then `config.json`.
+
+For Docker, mount the file where autopulse expects it, for example `./config.yaml:/app/config.yaml`. Accidentally mounting a directory or mounting the file somewhere else will leave autopulse running with defaults and environment overrides only. Check startup logs for `loaded config from ...` or `no config file found ...`.
+
+### Which Docker tag or binary release should I use?
+
+Use `stable` for the latest versioned release. Use `latest` if you want the newest Docker build from the main branch. Binaries are published with versioned releases and can lag behind Docker `latest`.
+
+Use the default image if you want both SQLite and Postgres support, or the smaller `-sqlite` / `-postgres` tags if you only need one database. SQLite is simplest for most single-instance home installs. Postgres is better if you already run it, expect heavier concurrency, or want a more traditional server database. `sqlite://:memory:` can be used for disposable databases in testing or ephemeral use.
+
+### Why use autopulse instead of Jellyfin's built-in real-time monitoring?
+
+Jellyfin's library monitor (`Library/Watcher` in Emby parlance) watches the filesystem for changes through the host OS. That works well when:
+
+- Your media lives on a local disk.
+- File events are reliable, such as on local ext4, btrfs, or NTFS volumes.
+- A single Jellyfin instance is your only consumer of the library.
+
+autopulse is useful when those assumptions stop holding:
+
+- **Network shares:** SMB, NFS, and rclone mounts can drop or never emit filesystem events. autopulse uses a push signal from the application that produced the file, such as Sonarr or Radarr.
+- **Multi-server fan-out:** one trigger can update Plex, Jellyfin, Emby, multiple Plex servers, or another autopulse instance.
+- **Targeted updates:** Jellyfin's monitor starts a library scan. autopulse sends a file-scoped refresh, item-level when `refresh_metadata` is enabled, otherwise a path-scoped notification.
+- **Hashes and waits:** autopulse can wait for a file to exist, verify a provided sha256 hash, and delay processing while post-processing scripts finish renames or remuxes.
+- **Retries and audit trail:** a temporarily offline target produces a retried event instead of a lost notification. Every event is stored in the database for inspection.
+
+If you only run Jellyfin on local media and filesystem events are reliable, the built-in monitor is fine. autopulse is for the cases where that stops being true.
+
+### Why not just trigger a full library scan on every event?
+
+Full scans are expensive on large libraries. autopulse locates the specific item in the target and refreshes only that item, so the work scales with the size of the change instead of the size of the library.
+
+### Why migrate from autoscan?
+
+[autoscan](https://github.com/Cloudbox/autoscan) is a great project and autopulse takes inspiration from it, but autoscan is no longer maintained. It also uses a general folder scan rather than a specific file update. autopulse finds the corresponding library item and sends an update request directly.
 
 ## License
 

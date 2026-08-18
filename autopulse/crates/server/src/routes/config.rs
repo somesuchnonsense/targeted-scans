@@ -1,14 +1,12 @@
-use crate::middleware::auth::check_auth;
+use crate::middleware::auth::AuthenticatedUser;
 use actix_web::{get, web, HttpResponse, Result};
-use actix_web_httpauth::extractors::basic::BasicAuth;
 use autopulse_database::conn::DatabaseType;
 use autopulse_service::manager::PulseManager;
 use autopulse_service::settings::app::App;
 use autopulse_service::settings::targets::{Target, TargetType};
 use autopulse_service::settings::triggers::{Trigger, TriggerType};
-use autopulse_service::settings::{default_triggers, Settings};
+use autopulse_service::settings::Settings;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 fn default_database_type() -> DatabaseType {
     DatabaseType::default()
@@ -48,18 +46,9 @@ pub struct TemplateResponse {
 #[get("/api/config-template")]
 pub async fn config_template(
     query: web::Query<TemplateQuery>,
-    auth: Option<BasicAuth>,
-    manager: web::Data<PulseManager>,
+    _auth: AuthenticatedUser,
+    _manager: web::Data<PulseManager>,
 ) -> Result<HttpResponse> {
-    if !check_auth(
-        &auth,
-        &manager.settings.auth.enabled,
-        &manager.settings.auth.username,
-        &manager.settings.auth.password,
-    ) {
-        return Ok(HttpResponse::Unauthorized().json("Authentication required"));
-    }
-
     let response = generate_config_template(
         &query.database,
         &serde_json::from_str::<Vec<TriggerType>>(&format!(
@@ -92,7 +81,7 @@ pub async fn config_template(
     )
     .map_err(|e| {
         actix_web::error::ErrorInternalServerError(format!(
-            "falsed to generate config template: {}",
+            "failed to generate config template: {}",
             e
         ))
     })?;
@@ -123,7 +112,10 @@ fn generate_config_template(
         ..Default::default()
     };
 
-    let mut triggers = default_triggers();
+    let mut settings = Settings {
+        app,
+        ..Default::default()
+    };
 
     for trigger in input_triggers {
         let name = serde_json::to_string(trigger)?.replace('"', "");
@@ -131,13 +123,13 @@ fn generate_config_template(
         let mut count = 0;
         let mut key = name.clone();
 
-        while triggers.contains_key(&key) {
+        while settings.triggers.contains_key(&key) {
             count += 1;
 
             key = format!("{}_{}", name, count);
         }
 
-        triggers.insert(
+        settings.triggers.insert(
             key,
             match trigger {
                 TriggerType::Manual => Trigger::Manual(serde_json::from_str(r#"{}"#)?),
@@ -145,6 +137,7 @@ fn generate_config_template(
                 TriggerType::Autoscan => Trigger::Autoscan(serde_json::from_str(r#"{}"#)?),
                 TriggerType::Radarr => Trigger::Radarr(serde_json::from_str(r#"{}"#)?),
                 TriggerType::Sonarr => Trigger::Sonarr(serde_json::from_str(r#"{}"#)?),
+                TriggerType::Sportarr => Trigger::Sportarr(serde_json::from_str(r#"{}"#)?),
                 TriggerType::Lidarr => Trigger::Lidarr(serde_json::from_str(r#"{}"#)?),
                 TriggerType::Readarr => Trigger::Readarr(serde_json::from_str(r#"{}"#)?),
                 TriggerType::Notify => {
@@ -154,20 +147,18 @@ fn generate_config_template(
         );
     }
 
-    let mut targets = HashMap::new();
-
     for target in input_targets {
         let name = serde_json::to_string(target)?.replace('"', "");
         let mut count = 0;
         let mut key = name.clone();
 
-        while targets.contains_key(&key) {
+        while settings.targets.contains_key(&key) {
             count += 1;
 
             key = format!("{}_{}", name, count);
         }
 
-        targets.insert(
+        settings.targets.insert(
             key,
             match target {
                 TargetType::Plex => Target::Plex(serde_json::from_str(
@@ -189,7 +180,7 @@ fn generate_config_template(
                     r#"{"url": "{url}", "token": "{token}"}"#,
                 )?),
                 TargetType::Command => Target::Command(serde_json::from_str(
-                    r#"{"command": "echo 'Processing {path}'"}"#,
+                    r#"{"raw": "echo 'Processing $FILE_PATH'"}"#,
                 )?),
                 TargetType::FileFlows => {
                     Target::FileFlows(serde_json::from_str(r#"{"url": "{url}"}"#)?)
@@ -197,16 +188,12 @@ fn generate_config_template(
                 TargetType::Autopulse => {
                     Target::Autopulse(serde_json::from_str(r#"{"url": "{url}", "auth": {"username": "{username}", "password": "{password}" }}"#)?)
                 }
+                TargetType::Audiobookshelf => Target::Audiobookshelf(serde_json::from_str(
+                    r#"{"url": "{url}", "token": "{token}"}"#,
+                )?),
             },
         );
     }
-
-    let settings = Settings {
-        app,
-        triggers,
-        targets,
-        ..Default::default()
-    };
 
     let app_config = match output_type {
         OutputType::Json => serde_json::to_string_pretty(&settings)?,
@@ -230,7 +217,7 @@ mod tests {
         let triggers = vec![TriggerType::Manual];
         let targets = vec![TargetType::Plex];
         let result = generate_config_template(
-            &DatabaseType::Sqlite,
+            &DatabaseType::default(),
             &triggers,
             &targets,
             &OutputType::Json,
@@ -243,7 +230,6 @@ mod tests {
         let config_str = response["config"].as_str().unwrap();
         assert!(config_str.contains("manual"));
         assert!(config_str.contains("plex"));
-        assert!(config_str.contains("sqlite://data/autopulse.db"));
     }
 
     #[test]
@@ -255,7 +241,7 @@ mod tests {
         ];
         let targets = vec![TargetType::Jellyfin, TargetType::Tdarr];
         let result = generate_config_template(
-            &DatabaseType::Postgres,
+            &DatabaseType::default(),
             &triggers,
             &targets,
             &OutputType::Toml,
@@ -271,7 +257,6 @@ mod tests {
         assert!(config_str.contains("sonarr"));
         assert!(config_str.contains("jellyfin"));
         assert!(config_str.contains("tdarr"));
-        assert!(config_str.contains("postgres://autopulse:autopulse@localhost:5432/autopulse"));
     }
 
     #[test]
@@ -279,7 +264,7 @@ mod tests {
         let triggers = vec![];
         let targets = vec![];
         let result = generate_config_template(
-            &DatabaseType::Sqlite,
+            &DatabaseType::default(),
             &triggers,
             &targets,
             &OutputType::Json,
@@ -299,10 +284,8 @@ mod tests {
     fn test_generate_config_template_invalid_output_type() {
         let triggers = vec![TriggerType::Manual];
         let targets = vec![TargetType::Plex];
-        // OutputType is always valid due to enum, so this test is not needed.
-        // But we can test that TOML output parses.
         let result = generate_config_template(
-            &DatabaseType::Sqlite,
+            &DatabaseType::default(),
             &triggers,
             &targets,
             &OutputType::Toml,
@@ -314,17 +297,14 @@ mod tests {
         let config_str = response["config"].as_str().unwrap();
         assert!(config_str.contains("manual"));
         assert!(config_str.contains("plex"));
-        assert!(config_str.contains("sqlite://data/autopulse.db"));
     }
 
     #[test]
     fn test_generate_config_template_multiple_same_type() {
         let triggers = vec![TriggerType::Manual, TriggerType::Manual];
         let targets = vec![TargetType::Plex, TargetType::Plex];
-        // OutputType is always valid due to enum, so this test is not needed.
-        // But we can test that TOML output parses.
         let result = generate_config_template(
-            &DatabaseType::Sqlite,
+            &DatabaseType::default(),
             &triggers,
             &targets,
             &OutputType::Toml,
@@ -338,5 +318,57 @@ mod tests {
         assert!(config_str.contains("manual_1"));
         assert!(config_str.contains("plex"));
         assert!(config_str.contains("plex_1"));
+    }
+
+    #[test]
+    fn generated_json_command_template_round_trips_with_a_runnable_command() {
+        let triggers = vec![];
+        let targets = vec![TargetType::Command];
+        let result = generate_config_template(
+            &DatabaseType::default(),
+            &triggers,
+            &targets,
+            &OutputType::Json,
+        )
+        .unwrap();
+
+        let response = serde_json::to_value(&result).unwrap();
+        let config_str = response["config"].as_str().unwrap();
+        let settings: Settings = serde_json::from_str(config_str).unwrap();
+
+        let Some(Target::Command(command)) = settings.targets.get("command") else {
+            panic!("expected generated command target");
+        };
+
+        assert!(
+            command.raw.is_some() || command.path.is_some(),
+            "generated command target must be runnable"
+        );
+    }
+
+    #[test]
+    fn generated_toml_command_template_round_trips_with_a_runnable_command() {
+        let triggers = vec![];
+        let targets = vec![TargetType::Command];
+        let result = generate_config_template(
+            &DatabaseType::default(),
+            &triggers,
+            &targets,
+            &OutputType::Toml,
+        )
+        .unwrap();
+
+        let response = serde_json::to_value(&result).unwrap();
+        let config_str = response["config"].as_str().unwrap();
+        let settings: Settings = toml::from_str(config_str).unwrap();
+
+        let Some(Target::Command(command)) = settings.targets.get("command") else {
+            panic!("expected generated command target");
+        };
+
+        assert!(
+            command.raw.is_some() || command.path.is_some(),
+            "generated command target must be runnable"
+        );
     }
 }

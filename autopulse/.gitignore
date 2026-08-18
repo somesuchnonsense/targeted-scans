@@ -1,21 +1,22 @@
+# worktrees
+.worktrees
+
 # direnv
 .envrc
 .direnv
 
 # Testing
 /config.*
-!config.example.yaml
 autopulse.log
 data
 /target
-docker-compose.yml
-!docker-compose.example.yml
 
 # Debugging
 .vscode/launch.json
 
 # Random testing scripts
 *.sh
+!docker-entrypoint.sh
 
 # Nix
 result
@@ -23,3 +24,8 @@ result
 # md files
 *.md
 !README.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

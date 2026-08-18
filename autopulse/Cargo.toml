@@ -5,12 +5,18 @@ edition = "2021"
 version.workspace = true
 
 [workspace.package]
-version = "1.5.0"
+version = "2.0.0"
 
 [features]
-vendored = ["autopulse-service/vendored", "autopulse-database/vendored"]
-sqlite = ["autopulse-database/sqlite"]
-postgres = ["autopulse-database/postgres"]
+vendored = ["autopulse-service/vendored", "postgres-vendored", "sqlite-vendored"]
+sqlite = ["autopulse-database/sqlite", "autopulse-server/sqlite", "autopulse-service/sqlite"]
+postgres = [
+    "autopulse-database/postgres",
+    "autopulse-server/postgres",
+    "autopulse-service/postgres",
+]
+sqlite-vendored = ["sqlite", "autopulse-database/sqlite-vendored"]
+postgres-vendored = ["postgres", "autopulse-database/postgres-vendored"]
 default = ["sqlite", "postgres"]
 
 [dependencies]
@@ -32,8 +38,17 @@ clap = { version = "4.5.29", default-features = false, features = [
     "help",
 ] }
 
+# LTO lets the linker drop the unreferenced `icondata` Lucide statics that the
+# UI never uses; without it the whole pack is embedded and the binary balloons.
+[profile.release]
+lto = true
+
 [workspace]
 members = ["crates/*"]
+
+[patch.crates-io]
+# See workspace.dependencies.tracing-appender for context.
+tracing-appender = { git = "https://github.com/dan-online/tracing.git", rev = "76c45b0cedcfbcc71c05da3e528c83a0f42c026f" }
 
 [workspace.dependencies]
 # Crates
@@ -51,6 +66,11 @@ serde_json = "1.0.139"
 
 # Tracing
 tracing = "0.1.41"
+# Pinned to dan-online/tracing fork (commit 76c45b0c) which backports
+# upstream PR tokio-rs/tracing#3255 onto v0.2.5, adding the `local-time`
+# feature flag. Drop this patch when the upstream PR merges and a release
+# ships.
+tracing-appender = { version = "0.2.5", features = ["local-time"] }
 
 # Date and time
 chrono = { version = "0.4.38", features = ["serde"] }
@@ -62,6 +82,9 @@ futures = { version = "0.3.31" }
 
 # URL parsing
 url = "2.5.4"
+
+# Path handling
+typed-path = "0.12"
 
 # [dev-dependencies]
 # # Standardize logging output

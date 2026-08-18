@@ -1,19 +1,19 @@
 use super::{Request, RequestBuilderPerform};
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::targets::TargetProcess;
 use anyhow::Context;
 use autopulse_database::models::ScanEvent;
-use autopulse_utils::get_url;
-use futures::future::join_all;
+use autopulse_utils::{get_url, RuntimePath};
 use reqwest::header;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Display, io::Cursor, path::Path};
+use std::{collections::HashMap, fmt::Display, io::Cursor};
 use struson::{
     json_path,
     reader::{JsonReader, JsonStreamReader},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error};
 
 #[doc(hidden)]
 const fn default_true() -> bool {
@@ -34,9 +34,26 @@ pub struct Emby {
     pub refresh_metadata: bool,
     /// Rewrite path for the file
     pub rewrite: Option<Rewrite>,
+    /// Path filter matched against the target-rewritten path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// HTTP request options
     #[serde(default)]
     pub request: Request,
+    /// How library locations are compared to incoming paths. Default `case_sensitive`.
+    #[serde(default)]
+    pub path_match: PathMatch,
+}
+
+/// How library locations are compared to incoming paths.
+#[derive(Serialize, Clone, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PathMatch {
+    /// Exact byte-for-byte prefix match (default; safe on Linux).
+    #[default]
+    CaseSensitive,
+    /// Lowercase both sides before comparing. Useful on Windows / UNC paths.
+    CaseInsensitive,
 }
 
 /// Metadata refresh mode for Jellyfin/Emby
@@ -79,50 +96,27 @@ struct Library {
     collection_type: Option<String>,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+#[doc(hidden)]
+struct UpdateRequest {
+    path: String,
+    update_type: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+#[doc(hidden)]
+struct ScanPayload {
+    updates: Vec<UpdateRequest>,
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 #[doc(hidden)]
 struct Item {
     id: String,
     path: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "PascalCase")]
-#[doc(hidden)]
-struct ScanPathRequest {
-    path: String,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "PascalCase")]
-#[doc(hidden)]
-struct ScanPathsRequest {
-    paths: Vec<String>,
-}
-
-#[derive(Deserialize, Clone)]
-#[serde(rename_all = "PascalCase")]
-#[doc(hidden)]
-struct ScanPathResponse {
-    #[serde(default)]
-    item_id: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    item_name: String,
-    status: String,
-    #[serde(default)]
-    path: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    message: String,
-}
-
-#[derive(Deserialize, Clone)]
-#[serde(rename_all = "PascalCase")]
-#[doc(hidden)]
-struct ScanPathsResponse {
-    results: Vec<ScanPathResponse>,
 }
 
 impl Emby {
@@ -152,20 +146,28 @@ impl Emby {
     }
 
     fn get_libraries(&self, libraries: &[Library], path: &str) -> Vec<Library> {
-        let ev_path = Path::new(path);
         let mut matched: Vec<Library> = vec![];
 
         for library in libraries {
             for location in &library.locations {
-                let path = Path::new(location);
-
-                if ev_path.starts_with(path) {
+                if self.path_prefix_matches(location, path) {
                     matched.push(library.clone());
+                    break; // one location is enough to match this library
                 }
             }
         }
 
         matched
+    }
+
+    fn path_prefix_matches(&self, location: &str, ev_path: &str) -> bool {
+        let location = RuntimePath::new(location);
+        let event = RuntimePath::new(ev_path);
+
+        match self.path_match {
+            PathMatch::CaseSensitive => event.starts_with_case_sensitive(location),
+            PathMatch::CaseInsensitive => event.starts_with_ascii_case_insensitive(location),
+        }
     }
 
     async fn _get_item(&self, library: &Library, path: &str) -> anyhow::Result<Option<Item>> {
@@ -320,6 +322,30 @@ impl Emby {
         Ok((found_in_library, not_found_in_library))
     }
 
+    // not as effective as refreshing the item, but good enough
+    async fn scan(&self, ev: &[&ScanEvent]) -> anyhow::Result<()> {
+        let client = self.get_client()?;
+        let url = get_url(&self.url)?.join("Library/Media/Updated")?;
+
+        let updates = ev
+            .iter()
+            .map(|ev| UpdateRequest {
+                path: ev.get_path(&self.rewrite),
+                update_type: "Modified".to_string(),
+            })
+            .collect();
+
+        let body = ScanPayload { updates };
+
+        client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .perform()
+            .await
+            .map(|_| ())
+    }
+
     async fn refresh_item(&self, item: &Item) -> anyhow::Result<()> {
         let client = self.get_client()?;
         let mut url = get_url(&self.url)?.join(&format!("Items/{}/Refresh", item.id))?;
@@ -342,69 +368,6 @@ impl Emby {
 
         client.post(url).perform().await.map(|_| ())
     }
-
-    /// Attempt a targeted scan via the TargetedScan plugin's POST /Library/ScanPath endpoint.
-    /// Returns Ok with the response on success (including PathNotFound/ParentNotFound),
-    /// or Err if the plugin is not installed or the response cannot be parsed.
-    async fn targeted_scan(&self, path: &str) -> anyhow::Result<ScanPathResponse> {
-        let client = self.get_client()?;
-        let url = get_url(&self.url)?.join("Library/ScanPath")?;
-
-        let body = ScanPathRequest {
-            path: path.to_string(),
-        };
-
-        let response = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        // Parse response body even for non-200 statuses — Jellyfin returns 404
-        // with a valid JSON body for PathNotFound/ParentNotFound
-        if let Ok(result) = serde_json::from_str::<ScanPathResponse>(&body_text) {
-            return Ok(result);
-        }
-
-        Err(anyhow::anyhow!(
-            "ScanPath failed with {}: {}",
-            status,
-            body_text
-        ))
-    }
-
-    /// Batch targeted scan via POST /Library/ScanPaths.
-    /// Returns Ok with per-path results, or Err if the endpoint is unavailable.
-    async fn targeted_scan_batch(&self, paths: Vec<String>) -> anyhow::Result<ScanPathsResponse> {
-        let client = self.get_client()?;
-        let url = get_url(&self.url)?.join("Library/ScanPaths")?;
-
-        let body = ScanPathsRequest { paths };
-
-        let response = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await.unwrap_or_default();
-
-        if let Ok(result) = serde_json::from_str::<ScanPathsResponse>(&body_text) {
-            return Ok(result);
-        }
-
-        Err(anyhow::anyhow!(
-            "ScanPaths failed with {}: {}",
-            status,
-            body_text
-        ))
-    }
 }
 
 impl TargetProcess for Emby {
@@ -416,133 +379,27 @@ impl TargetProcess for Emby {
 
         let mut succeeded: HashMap<String, bool> = HashMap::new();
 
-        // Map all events to their rewritten paths, validating each matches a library
-        let mut all_with_paths: Vec<(&ScanEvent, String)> = Vec::new();
-        for ev in evs {
-            let ev_path = ev.get_path(&self.rewrite);
-            let matched_libraries = self.get_libraries(&libraries, &ev_path);
-            if matched_libraries.is_empty() {
-                debug!("no matching library for {}, skipping (not a failure)", ev_path);
-                succeeded.insert(ev.id.clone(), true);
-                continue;
-            }
-            all_with_paths.push((*ev, ev_path));
-        }
+        let mut to_find = HashMap::new();
+        let mut to_refresh = Vec::new();
+        let mut to_scan = Vec::new();
 
-        if all_with_paths.is_empty() {
-            return Ok(vec![]);
-        }
+        if self.refresh_metadata {
+            for ev in evs {
+                let ev_path = ev.get_path(&self.rewrite);
 
-        // Tier 1: Batch targeted scan for ALL items (plugin handles both new and existing)
-        let batch_paths: Vec<String> = all_with_paths.iter().map(|(_, p)| p.clone()).collect();
-        let mut remaining: Vec<(&ScanEvent, String)>;
+                let matched_libraries = self.get_libraries(&libraries, &ev_path);
 
-        match self.targeted_scan_batch(batch_paths).await {
-            Ok(batch_result) => {
-                remaining = Vec::new();
-                let result_map: HashMap<&str, &ScanPathResponse> = batch_result.results
-                    .iter()
-                    .map(|r| {
-                        let key = if r.path.is_empty() { r.message.as_str() } else { r.path.as_str() };
-                        (key, r)
-                    })
-                    .collect();
-
-                for (ev, ev_path) in &all_with_paths {
-                    match result_map.get(ev_path.as_str()) {
-                        Some(r) if r.status == "Created" || r.status == "Refreshed" || r.status == "Discovered" => {
-                            info!(
-                                "targeted scan succeeded for {}: {} ({})",
-                                ev_path, r.item_id, r.status
-                            );
-                            *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
-                        }
-                        Some(r) if r.status == "PathNotFound" || r.status == "ParentNotFound" => {
-                            debug!(
-                                "path no longer exists for {} ({}), skipping",
-                                ev_path, r.status
-                            );
-                            *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
-                        }
-                        _ => {
-                            remaining.push((*ev, ev_path.clone()));
-                        }
-                    }
+                if matched_libraries.is_empty() {
+                    let known: Vec<&str> = libraries
+                        .iter()
+                        .flat_map(|l| l.locations.iter().map(String::as_str))
+                        .collect();
+                    error!(
+                        "failed to find library for file '{ev_path}'. Known locations: {known:?}"
+                    );
+                    continue;
                 }
-            }
-            Err(e) => {
-                warn!("batch targeted scan failed ({}), trying individual requests", e);
-                remaining = all_with_paths.clone();
-            }
-        }
 
-        // Tier 2: Individual targeted scans with exponential backoff
-        let backoff_delays = [5, 15, 30];
-        for attempt in 0..=backoff_delays.len() {
-            if remaining.is_empty() {
-                break;
-            }
-
-            if attempt > 0 {
-                let delay = backoff_delays[attempt - 1];
-                info!(
-                    "retrying {} targeted scans in {}s (attempt {}/{})",
-                    remaining.len(), delay, attempt, backoff_delays.len()
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-            }
-
-            let scan_futures: Vec<_> = remaining.iter().map(|(ev, ev_path)| {
-                let path = ev_path.clone();
-                async move {
-                    let result = self.targeted_scan(&path).await;
-                    (*ev, path, result)
-                }
-            }).collect();
-            let results = join_all(scan_futures).await;
-
-            let mut still_remaining = Vec::new();
-            for (ev, ev_path, result) in results {
-                match result {
-                    Ok(scan_result)
-                        if scan_result.status == "PathNotFound"
-                            || scan_result.status == "ParentNotFound" =>
-                    {
-                        debug!(
-                            "path no longer exists for {} ({}), skipping",
-                            ev_path, scan_result.status
-                        );
-                        *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
-                    }
-                    Ok(scan_result) => {
-                        info!(
-                            "targeted scan succeeded for {}: {} ({})",
-                            ev_path, scan_result.item_id, scan_result.status
-                        );
-                        *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "targeted scan failed for {}: {}, will retry",
-                            ev_path, e
-                        );
-                        still_remaining.push((ev, ev_path));
-                    }
-                }
-            }
-            remaining = still_remaining;
-        }
-
-        // Tier 3: Fall back to library enumeration if plugin is unavailable
-        if !remaining.is_empty() && self.refresh_metadata {
-            warn!(
-                "targeted scan plugin unavailable for {} items, falling back to library enumeration",
-                remaining.len()
-            );
-
-            let mut to_find: HashMap<Library, Vec<&ScanEvent>> = HashMap::new();
-            for (ev, ev_path) in &remaining {
-                let matched_libraries = self.get_libraries(&libraries, ev_path);
                 for library in matched_libraries {
                     to_find.entry(library).or_insert_with(Vec::new).push(*ev);
                 }
@@ -559,34 +416,42 @@ impl TargetProcess for Emby {
                         )
                     })?;
 
-                for (ev, item) in found_in_library {
-                    match self.refresh_item(&item).await {
-                        Ok(()) => {
-                            debug!("refreshed item: {}", item.id);
-                            *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
-                        }
-                        Err(e) => {
-                            error!("failed to refresh item: {}", e);
-                            succeeded.insert(ev.id.clone(), false);
-                        }
+                to_refresh.extend(found_in_library);
+                to_scan.extend(not_found_in_library);
+            }
+
+            for (ev, item) in to_refresh {
+                match self.refresh_item(&item).await {
+                    Ok(()) => {
+                        debug!("refreshed item: {}", item.id);
+                        *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
+                    }
+                    Err(e) => {
+                        error!("failed to refresh item: {}", e);
+                        succeeded.insert(ev.id.clone(), false);
                     }
                 }
-
-                for ev in not_found_in_library {
-                    error!(
-                        "item not found after all methods: {}",
-                        ev.get_path(&self.rewrite)
-                    );
-                    succeeded.insert(ev.id.clone(), false);
-                }
             }
-        } else if !remaining.is_empty() {
-            for (ev, ev_path) in &remaining {
-                error!(
-                    "targeted scan failed for {} after all retries",
-                    ev_path
-                );
-                succeeded.insert(ev.id.clone(), false);
+        } else {
+            to_scan.extend(evs.iter().copied());
+        }
+
+        if !to_scan.is_empty() {
+            match self.scan(&to_scan).await {
+                Ok(()) => {
+                    for ev in &to_scan {
+                        debug!("scanned file: {}", ev.file_path);
+
+                        *succeeded.entry(ev.id.clone()).or_insert(true) &= true;
+                    }
+                }
+                Err(e) => {
+                    error!("failed to scan items: {}", e);
+
+                    for ev in &to_scan {
+                        succeeded.insert(ev.id.clone(), false);
+                    }
+                }
             }
         }
 
@@ -594,5 +459,125 @@ impl TargetProcess for Emby {
             .iter()
             .filter_map(|(k, v)| if *v { Some(k.clone()) } else { None })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lib(name: &str, paths: &[&str]) -> Library {
+        Library {
+            name: name.to_string(),
+            locations: paths.iter().map(|s| (*s).to_string()).collect(),
+            item_id: format!("id-{name}"),
+            collection_type: None,
+        }
+    }
+
+    fn target() -> Emby {
+        Emby {
+            url: "http://x".to_string(),
+            token: "t".to_string(),
+            metadata_refresh_mode: EmbyMetadataRefreshMode::default(),
+            refresh_metadata: true,
+            rewrite: None,
+            filter: PathFilter::default(),
+            request: Request::default(),
+            path_match: PathMatch::default(),
+        }
+    }
+
+    #[test]
+    fn matches_when_library_location_is_exact_prefix() {
+        let libs = vec![lib("TV", &["/media/TV"])];
+        let m = target().get_libraries(&libs, "/media/TV/Show/S01E01.mkv");
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn matches_when_library_location_has_trailing_slash() {
+        let libs = vec![lib("TV", &["/media/TV/"])];
+        let m = target().get_libraries(&libs, "/media/TV/Show/S01E01.mkv");
+        assert_eq!(
+            m.len(),
+            1,
+            "trailing slash on library location must not break match"
+        );
+    }
+
+    #[test]
+    fn no_match_when_path_outside_library() {
+        let libs = vec![lib("TV", &["/data/TV"])];
+        let m = target().get_libraries(&libs, "/media/TV/Show.mkv");
+        assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn case_insensitive_matching_when_opted_in() {
+        let mut t = target();
+        t.path_match = PathMatch::CaseInsensitive;
+        let libs = vec![lib("TV", &["/Media/TV"])];
+        let m = t.get_libraries(&libs, "/media/tv/Show.mkv");
+        assert_eq!(
+            m.len(),
+            1,
+            "case-insensitive must match across case differences"
+        );
+    }
+
+    #[test]
+    fn case_sensitive_matching_by_default() {
+        let libs = vec![lib("TV", &["/Media/TV"])];
+        let m = target().get_libraries(&libs, "/media/tv/Show.mkv");
+        assert_eq!(m.len(), 0);
+    }
+
+    #[test]
+    fn case_sensitive_mode_parses_windows_paths_but_preserves_case_policy() {
+        let libs = vec![lib("TV", &[r"C:\Media\TV\"])];
+        assert_eq!(
+            target()
+                .get_libraries(&libs, r"C:\Media\TV\Show\S01E01.mkv")
+                .len(),
+            1
+        );
+        assert_eq!(
+            target()
+                .get_libraries(&libs, r"c:\media\tv\Show\S01E01.mkv")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn case_insensitive_mode_folds_windows_ascii_case() {
+        let mut emby = target();
+        emby.path_match = PathMatch::CaseInsensitive;
+        let libs = vec![lib("TV", &[r"\\SERVER\MEDIA\TV"])];
+
+        assert_eq!(
+            emby.get_libraries(&libs, r"\\server\media\tv\Show\S01E01.mkv")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn library_prefix_requires_a_component_boundary() {
+        let libs = vec![lib("TV", &[r"\\server\media"])];
+        assert!(target()
+            .get_libraries(&libs, r"\\server\media-archive\Film.mkv")
+            .is_empty());
+    }
+
+    #[test]
+    fn library_prefix_does_not_cross_runtime_flavors() {
+        let mut emby = target();
+        emby.path_match = PathMatch::CaseInsensitive;
+        let libs = vec![lib("TV", &["/media/TV"])];
+        assert!(emby
+            .get_libraries(&libs, r"C:\media\TV\Show\S01E01.mkv")
+            .is_empty());
     }
 }

@@ -1,10 +1,11 @@
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::targets::TargetProcess;
 use autopulse_database::models::ScanEvent;
-use autopulse_utils::get_url;
+use autopulse_utils::{get_url, RuntimePath};
 use reqwest::header;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 use tracing::error;
 
 use super::{Request, RequestBuilderPerform};
@@ -17,6 +18,9 @@ pub struct Radarr {
     pub token: String,
     /// Rewrite path for the file
     pub rewrite: Option<Rewrite>,
+    /// Path filter matched against the target-rewritten path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// HTTP request options
     #[serde(default)]
     pub request: Request,
@@ -41,12 +45,20 @@ enum Command {
     RefreshMovie(RefreshMovie),
 }
 
+fn matching_movie_id(path: &str, movies: &[RadarrMovie]) -> Option<i64> {
+    let event = RuntimePath::new(path);
+    movies
+        .iter()
+        .find(|movie| event.starts_with(RuntimePath::new(&movie.path)))
+        .map(|movie| movie.id)
+}
+
 impl Radarr {
     fn get_client(&self) -> anyhow::Result<reqwest::Client> {
         let mut headers = header::HeaderMap::new();
 
-        headers.insert("X-Api-Key", self.token.parse().unwrap());
-        headers.insert("Accept", "application/json".parse().unwrap());
+        headers.insert("X-Api-Key", self.token.parse()?);
+        headers.insert("Accept", "application/json".parse()?);
 
         self.request
             .client_builder(headers)
@@ -55,7 +67,7 @@ impl Radarr {
     }
 
     async fn get_movies(&self, evs: &[&ScanEvent]) -> anyhow::Result<Vec<i64>> {
-        let client = self.get_client().unwrap();
+        let client = self.get_client()?;
 
         let url = get_url(&self.url)?.join("api/v3/movie")?;
         let mut to_be_refreshed: HashMap<i64, Vec<String>> = HashMap::new();
@@ -66,27 +78,22 @@ impl Radarr {
 
         for ev in evs {
             let ev_path = ev.get_path(&self.rewrite);
-            let ev_path = Path::new(&ev_path);
 
-            for movie in &movies {
-                let movie_path = Path::new(&movie.path);
-                if ev_path.starts_with(movie_path) {
-                    to_be_refreshed
-                        .entry(movie.id)
-                        .or_default()
-                        .push(ev.id.clone());
-                    break;
-                }
+            if let Some(movie_id) = matching_movie_id(&ev_path, &movies) {
+                to_be_refreshed
+                    .entry(movie_id)
+                    .or_default()
+                    .push(ev.id.clone());
             }
         }
 
-        // In future instead of batching the refresh command, just send individual refresh commands
-        // per movie and then only partially fail events that failed to refresh
+        // TODO: per-movie commands would let us isolate partial failures,
+        // but the serial-POST cost on large imports outweighs that today.
         Ok(to_be_refreshed.into_keys().collect())
     }
 
     async fn refresh_movies(&self, movie_ids: Vec<i64>) -> anyhow::Result<()> {
-        let client = self.get_client().unwrap();
+        let client = self.get_client()?;
         let url = get_url(&self.url)?.join("api/v3/command")?;
         let payload = Command::RefreshMovie(RefreshMovie { movie_ids });
 
@@ -105,10 +112,46 @@ impl TargetProcess for Radarr {
                 succeeded.extend(evs.iter().map(|ev| ev.id.clone()));
             }
             Err(e) => {
-                error!("failed to refresh series: {}", e);
+                error!("failed to refresh movies: {e}");
             }
         }
 
         Ok(succeeded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_windows_movie_case_insensitively_by_components() {
+        let movies = vec![RadarrMovie {
+            id: 24,
+            path: r"\\SERVER\Movies\The Matrix".to_string(),
+        }];
+
+        assert_eq!(
+            matching_movie_id(r"\\server\movies\the matrix\The Matrix (1999).mkv", &movies),
+            Some(24)
+        );
+    }
+
+    #[test]
+    fn rejects_movie_text_prefix_and_mixed_flavor() {
+        let windows = vec![RadarrMovie {
+            id: 24,
+            path: r"C:\Movies\Alien".to_string(),
+        }];
+        let unix = vec![RadarrMovie {
+            id: 12,
+            path: "/movies/Alien".to_string(),
+        }];
+
+        assert_eq!(
+            matching_movie_id(r"C:\Movies\Aliens\Aliens.mkv", &windows),
+            None
+        );
+        assert_eq!(matching_movie_id(r"C:\movies\Alien\Alien.mkv", &unix), None);
     }
 }

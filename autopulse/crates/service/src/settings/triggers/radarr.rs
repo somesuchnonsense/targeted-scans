@@ -1,6 +1,7 @@
+use crate::settings::path_filter::PathFilter;
 use crate::settings::rewrite::Rewrite;
 use crate::settings::timer::{EventTimers, Timer};
-use crate::settings::triggers::TriggerRequest;
+use crate::settings::triggers::{TriggerConfig, TriggerRequest};
 use autopulse_utils::join_path;
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +14,33 @@ pub struct Radarr {
     /// Targets to ignore
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// Path filter matched against the rewritten file path.
+    #[serde(default)]
+    pub filter: PathFilter,
     /// Event-specific timers
     pub event_timers: Option<EventTimers>,
+}
+
+impl TriggerConfig for Radarr {
+    fn rewrite(&self) -> Option<&Rewrite> {
+        self.rewrite.as_ref()
+    }
+
+    fn timer(&self) -> Option<&Timer> {
+        self.timer.as_ref()
+    }
+
+    fn excludes(&self) -> &Vec<String> {
+        &self.excludes
+    }
+
+    fn filter(&self) -> &PathFilter {
+        &self.filter
+    }
+
+    fn event_timers(&self) -> Option<&EventTimers> {
+        self.event_timers.as_ref()
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -54,6 +80,8 @@ pub enum RadarrRequest {
     Rename { movie: Movie },
     #[serde(rename = "Test")]
     Test,
+    #[serde(other)]
+    Other,
 }
 
 impl TriggerRequest for RadarrRequest {
@@ -90,7 +118,7 @@ impl TriggerRequest for RadarrRequest {
 
                 paths
             }
-            Self::Test => vec![],
+            Self::Test | Self::Other => vec![],
         }
     }
 }
