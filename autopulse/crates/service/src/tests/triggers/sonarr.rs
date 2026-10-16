@@ -215,6 +215,25 @@ mod tests {
     }
 
     #[test]
+    fn test_from_json_upgrade_includes_deleted_and_new_paths() {
+        let request = SonarrRequest::from_json(serde_json::json!({
+            "eventType": "Download",
+            "episodeFile": { "relativePath": "Season 1/new.mkv" },
+            "deletedFiles": [{ "relativePath": "Season 1/old.mkv" }],
+            "series": { "path": "/TV/Show" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            request.paths(),
+            vec![
+                ("/TV/Show/Season 1/new.mkv".to_string(), true),
+                ("/TV/Show/Season 1/old.mkv".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
     fn test_from_json_unknown_event_type() {
         let json = serde_json::json!({
             "eventType": "Grab",

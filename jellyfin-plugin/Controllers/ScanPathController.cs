@@ -79,6 +79,13 @@ public class ScanPathController : ControllerBase
                 Status = "Refreshed",
                 Message = "Existing item found, metadata refresh queued"
             }),
+            ScanStatus.Removed => Ok(new ScanPathResponse
+            {
+                ItemId = result.ItemId ?? string.Empty,
+                ItemName = result.ItemName ?? string.Empty,
+                Status = "Removed",
+                Message = "Stale item removed — file no longer exists"
+            }),
             ScanStatus.PathNotFound => NotFound(new ScanPathResponse
             {
                 Status = "PathNotFound",

@@ -169,6 +169,16 @@ targets:
 
 > **Path rewriting:** If Sonarr sees files at `/downloads/tv/...` but Jellyfin sees them at `/media/tv/...`, set `from: /downloads/tv` and `to: /media/tv`. If they share the same mount paths, set both to the same value.
 
+The existing `jellyfin` and `emby` target configuration remains compatible. Each
+target first uses the matching Targeted Scan plugin (`/Library/ScanPaths`, then
+`/Library/ScanPath` when the installed plugin only exposes the single-path
+endpoint). Jellyfin and Emby are handled as distinct target types; install the
+plugin built for that server.
+
+With `check_path: true`, import paths still wait until they are visible to
+Autopulse. Sonarr/Radarr deletion paths and old rename/upgrade paths bypass that
+existence check and are sent to the plugin so stale items can be removed.
+
 Each trigger becomes a webhook endpoint at `http://autopulse:2875/triggers/<name>` — you'll use these URLs in the next step.
 
 ```bash
@@ -321,6 +331,7 @@ Scan multiple paths in a single batch.
       "ItemId": "abc123...",
       "ItemName": "S01E01",
       "Status": "Created",
+      "Path": "/media/TV/Breaking Bad/Season 1/S01E01.mkv",
       "Message": "/media/TV/Breaking Bad/Season 1/S01E01.mkv"
     }
   ]
@@ -333,9 +344,18 @@ Scan multiple paths in a single batch.
 |--------|-------------|
 | `Created` | New item created and metadata refresh queued |
 | `Refreshed` | Item already existed, metadata refresh queued |
+| `Removed` | Stale item removed because its filesystem path is gone |
 | `PathNotFound` | Path does not exist on the filesystem |
 | `ParentNotFound` | Could not find a parent library item for the path |
 | `Failed` | Scan failed |
+
+For deletion events, `Removed`, `PathNotFound`, and `ParentNotFound` are terminal
+successes: either the stale item was removed or there is nothing left to remove.
+For imports, `PathNotFound` and `ParentNotFound` are retried because a remote
+mount may not be visible yet. Mixed batch responses are tracked per path, so a
+successful path is not repeated while another path retries. If the plugin is
+absent, imports retain the standard Jellyfin/Emby discovery fallback; deletions
+do not fall back to metadata refresh because that can preserve a stale item.
 
 ---
 

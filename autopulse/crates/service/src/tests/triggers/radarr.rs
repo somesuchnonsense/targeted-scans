@@ -106,7 +106,7 @@ mod tests {
 
         let radarr_request = RadarrRequest::from_json(json).unwrap();
 
-        if let RadarrRequest::Rename { movie } = radarr_request.clone() {
+        if let RadarrRequest::Rename { movie, .. } = radarr_request.clone() {
             assert_eq!(movie.folder_path, "/Movies/Deadpool (2016)");
             assert_eq!(
                 radarr_request.paths(),
@@ -115,5 +115,45 @@ mod tests {
         } else {
             panic!("Unexpected variant");
         }
+    }
+
+    #[test]
+    fn test_from_json_upgrade_includes_deleted_and_new_paths() {
+        let request = RadarrRequest::from_json(serde_json::json!({
+            "eventType": "Download",
+            "movieFile": { "relativePath": "new.mkv" },
+            "deletedFiles": [{ "relativePath": "old.mkv" }],
+            "movie": { "folderPath": "/Movies/Film" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            request.paths(),
+            vec![
+                ("/Movies/Film/new.mkv".to_string(), true),
+                ("/Movies/Film/old.mkv".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_from_json_rename_with_old_and_new_paths() {
+        let json = serde_json::json!({
+            "eventType": "Rename",
+            "movie": { "folderPath": "/Movies/Deadpool (2016)" },
+            "renamedMovieFiles": [{
+                "previousPath": "/Movies/Deadpool (2016)/old.mkv",
+                "path": "/Movies/Deadpool (2016)/new.mkv"
+            }]
+        });
+
+        let request = RadarrRequest::from_json(json).unwrap();
+        assert_eq!(
+            request.paths(),
+            vec![
+                ("/Movies/Deadpool (2016)/old.mkv".to_string(), false),
+                ("/Movies/Deadpool (2016)/new.mkv".to_string(), true),
+            ]
+        );
     }
 }

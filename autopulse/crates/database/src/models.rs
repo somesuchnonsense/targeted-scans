@@ -21,6 +21,9 @@ pub enum FoundStatus {
     Found,
     NotFound,
     HashMismatch,
+    /// The source confirmed that the path was removed. Unlike `NotFound`, this
+    /// is processable even when path checking is enabled.
+    Missing,
 }
 
 impl Display for FoundStatus {
@@ -29,6 +32,7 @@ impl Display for FoundStatus {
             Self::Found => "found",
             Self::NotFound => "not_found",
             Self::HashMismatch => "hash_mismatch",
+            Self::Missing => "missing",
         };
 
         write!(f, "{status}")

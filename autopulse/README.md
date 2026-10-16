@@ -406,7 +406,7 @@ Trigger rewrites run before the event is stored. Target rewrites run later per t
 
 Not by default. With `opts.check_path = false`, autopulse can route webhook paths without reading the file itself.
 
-If `opts.check_path = true`, the rewritten path must exist inside the autopulse runtime/container before the event is sent to targets. Hash checks and `anchors` also require filesystem access. Mount those paths read-only if possible, and make sure your rewrites point to the path as autopulse sees it.
+If `opts.check_path = true`, import paths must exist inside the autopulse runtime/container before the event is sent to targets. Confirmed Sonarr/Radarr deletion paths (including old rename/upgrade paths) are sent without requiring the deleted file to exist. Hash checks and `anchors` also require filesystem access. Mount import paths read-only if possible, and make sure your rewrites point to the path as autopulse sees it.
 
 Targets still need their own valid library paths and autopulse must be able to reach the target API URL.
 
@@ -434,7 +434,7 @@ autopulse is useful when those assumptions stop holding:
 
 - **Network shares:** SMB, NFS, and rclone mounts can drop or never emit filesystem events. autopulse uses a push signal from the application that produced the file, such as Sonarr or Radarr.
 - **Multi-server fan-out:** one trigger can update Plex, Jellyfin, Emby, multiple Plex servers, or another autopulse instance.
-- **Targeted updates:** Jellyfin's monitor starts a library scan. autopulse sends a file-scoped refresh, item-level when `refresh_metadata` is enabled, otherwise a path-scoped notification.
+- **Targeted updates:** `jellyfin` and `emby` targets call their respective Targeted Scan plugin's batch endpoint, with its single-path endpoint as a compatibility fallback. This discovers new files, refreshes existing items, and removes stale deleted items. If the plugin is not installed, only non-deletion events may fall back to the server's standard item refresh/path notification APIs.
 - **Hashes and waits:** autopulse can wait for a file to exist, verify a provided sha256 hash, and delay processing while post-processing scripts finish renames or remuxes.
 - **Retries and audit trail:** a temporarily offline target produces a retried event instead of a lost notification. Every event is stored in the database for inspection.
 

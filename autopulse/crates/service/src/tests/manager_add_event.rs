@@ -1,10 +1,10 @@
 #[cfg(feature = "sqlite")]
 use crate::tests::util::fresh_manager;
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
 use crate::{manager::PulseManager, settings::Settings};
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 use autopulse_database::conn::get_conn;
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
 use autopulse_database::conn::get_pool;
 use autopulse_database::models::NewScanEvent;
 #[cfg(feature = "sqlite")]
@@ -85,6 +85,25 @@ fn dedupe_does_not_regress_found_status() {
         after.found_status, "found",
         "must not downgrade found→not_found on coalesce"
     );
+}
+
+#[test]
+#[cfg(feature = "sqlite")]
+fn dedupe_preserves_confirmed_missing_intent() {
+    let database_url = "sqlite://:memory:".to_string();
+    let pool = get_pool(&database_url).unwrap();
+    get_conn(&pool).unwrap().migrate().unwrap();
+    let m = PulseManager::new(Settings::default(), pool);
+    let inserted = m
+        .add_event(&new_event("sonarr", "/media/deleted.mkv", 30))
+        .unwrap();
+    assert_eq!(inserted.found_status, "not_found");
+
+    let mut missing = new_event("sonarr", "/media/deleted.mkv", 30);
+    missing.found_status = FoundStatus::Missing.into();
+    let after = m.add_event(&missing).unwrap();
+    assert_eq!(after.id, inserted.id);
+    assert_eq!(after.found_status, "missing");
 }
 
 #[test]

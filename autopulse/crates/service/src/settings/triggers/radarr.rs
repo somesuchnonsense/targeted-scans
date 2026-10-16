@@ -58,6 +58,14 @@ pub struct Movie {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct RenamedMovieFile {
+    pub previous_path: String,
+    pub path: String,
+}
+
+#[derive(Deserialize, Clone)]
 #[serde(tag = "eventType")]
 #[doc(hidden)]
 pub enum RadarrRequest {
@@ -77,7 +85,11 @@ pub enum RadarrRequest {
     MovieFileDelete { movie_file: MovieFile, movie: Movie },
     #[serde(rename = "Rename")]
     #[serde(rename_all = "camelCase")]
-    Rename { movie: Movie },
+    Rename {
+        movie: Movie,
+        #[serde(default)]
+        renamed_movie_files: Vec<RenamedMovieFile>,
+    },
     #[serde(rename = "Test")]
     Test,
     #[serde(other)]
@@ -96,8 +108,25 @@ impl TriggerRequest for RadarrRequest {
                     false,
                 )]
             }
-            Self::Rename { movie } => {
-                vec![(movie.folder_path.clone(), true)]
+            Self::Rename {
+                movie,
+                renamed_movie_files,
+            } => {
+                if renamed_movie_files.is_empty() {
+                    // Compatibility with older Radarr payloads that only sent
+                    // the movie folder.
+                    return vec![(movie.folder_path.clone(), true)];
+                }
+
+                renamed_movie_files
+                    .iter()
+                    .flat_map(|file| {
+                        [
+                            (file.previous_path.clone(), false),
+                            (file.path.clone(), true),
+                        ]
+                    })
+                    .collect()
             }
             Self::MovieDelete { movie } => {
                 vec![(movie.folder_path.clone(), false)]

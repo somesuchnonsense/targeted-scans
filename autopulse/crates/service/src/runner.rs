@@ -44,6 +44,7 @@ impl<'a> PulseRunner<'a> {
 
         let mut evs = scan_events
             .filter(found_status.ne::<String>(FoundStatus::Found.into()))
+            .filter(found_status.ne::<String>(FoundStatus::Missing.into()))
             .filter(process_status.eq::<String>(ProcessStatus::Pending.into()))
             .load::<ScanEvent>(&mut get_conn(&self.manager.pool)?)?;
 
@@ -160,7 +161,11 @@ impl<'a> PulseRunner<'a> {
 
         let mut evs = if self.manager.settings.opts.check_path {
             base_query
-                .filter(found_status.eq::<String>(FoundStatus::Found.into()))
+                .filter(
+                    found_status
+                        .eq::<String>(FoundStatus::Found.into())
+                        .or(found_status.eq::<String>(FoundStatus::Missing.into())),
+                )
                 .load::<ScanEvent>(&mut get_conn(&self.manager.pool)?)?
         } else {
             base_query.load::<ScanEvent>(&mut get_conn(&self.manager.pool)?)?

@@ -255,11 +255,11 @@ fn upsert_pending_pg(
 ) -> anyhow::Result<ScanEvent> {
     use crate::models::ProcessStatus;
     use crate::schema::scan_events::dsl::{
-        can_process, file_hash, file_path, process_status, updated_at,
+        can_process, file_hash, file_path, found_status, process_status, updated_at,
     };
     use diesel::dsl::case_when;
     use diesel::upsert::{excluded, DecoratableTarget};
-    use diesel::ExpressionMethods;
+    use diesel::{BoolExpressionMethods, ExpressionMethods};
 
     // Keep this predicate aligned with the partial index; Postgres checks that
     // match at runtime, and the smoke test covers it.
@@ -278,6 +278,15 @@ fn upsert_pending_pg(
                     .otherwise(can_process),
             ),
             file_hash.eq(case_when(file_hash.is_null(), excluded(file_hash)).otherwise(file_hash)),
+            // A deletion must remain a deletion when queued rows coalesce;
+            // otherwise a stale item could be sent through metadata refresh.
+            found_status.eq(case_when::<_, _, diesel::sql_types::Text>(
+                found_status
+                    .eq("missing")
+                    .or(excluded(found_status).eq("missing")),
+                "missing",
+            )
+            .otherwise(found_status)),
         ))
         .returning(ScanEvent::as_returning())
         .get_result::<ScanEvent>(conn)
@@ -292,7 +301,7 @@ fn upsert_pending_sqlite(
 ) -> anyhow::Result<ScanEvent> {
     use crate::models::ProcessStatus;
     use crate::schema::scan_events::dsl::{
-        can_process, file_hash, file_path, process_status, scan_events, updated_at,
+        can_process, file_hash, file_path, found_status, process_status, scan_events, updated_at,
     };
     use diesel::{ExpressionMethods, QueryDsl};
     use diesel::{OptionalExtension, SelectableHelper};
@@ -311,11 +320,18 @@ fn upsert_pending_sqlite(
     if let Some(existing) = existing {
         let later_can_process = std::cmp::max(existing.can_process, ev.can_process);
         let file_hash_value = existing.file_hash.clone().or_else(|| ev.file_hash.clone());
+        let found_status_value =
+            if existing.found_status == "missing" || ev.found_status == "missing" {
+                "missing".to_string()
+            } else {
+                existing.found_status.clone()
+            };
         diesel::update(&existing)
             .set((
                 updated_at.eq(now),
                 can_process.eq(later_can_process),
                 file_hash.eq(file_hash_value),
+                found_status.eq(found_status_value),
             ))
             .get_result::<ScanEvent>(conn)
             .map_err(Into::into)

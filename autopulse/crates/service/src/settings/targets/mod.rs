@@ -67,9 +67,11 @@ pub mod autopulse;
 ///
 /// See [`Command`] for all options
 pub mod command;
-/// Emby - Emby/Jellyfin target
+/// Emby and Jellyfin targets
 ///
-/// This target is used to refresh/scan a file in Emby/Jellyfin
+/// These target types use the corresponding Targeted Scan plugin. Keep the
+/// server type explicit: a Jellyfin plugin is not an Emby plugin (or vice versa).
+/// Existing target configuration remains compatible.
 ///
 /// # Example
 ///
@@ -337,7 +339,8 @@ impl TargetProcess for Target {
     async fn process(&self, evs: &[&ScanEvent]) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Plex(t) => t.process(evs).await,
-            Self::Jellyfin(t) | Self::Emby(t) => t.process(evs).await,
+            Self::Jellyfin(t) => t.process_for(emby::MediaServer::Jellyfin, evs).await,
+            Self::Emby(t) => t.process_for(emby::MediaServer::Emby, evs).await,
             Self::Command(t) => t.process(evs).await,
             Self::Tdarr(t) => t.process(evs).await,
             Self::Sonarr(t) => t.process(evs).await,
